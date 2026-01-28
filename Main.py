@@ -172,6 +172,15 @@ if st.button("Datenblatt erzeugen"):
     key = "KSY_B5" if b5 else "KSY_Stecker" if motor=="KSY" else "KSG"
     pdf_drawing_verzeichnis = ZEICHNUNGS_PFADE[key]
     pdf_drawing_datei = finde_pdf_mit_text(pdf_drawing_verzeichnis, Zeichnungs_string)
-
+    
     pdf_final_path = f"Datenblatt_{motor_string}_{spaltezahl_float}_V2.pdf"
     pdf_mergen(pdf_path, pdf_drawing_datei, pdf_final_path)
+    
+    # --- NEU: Download-Button ---
+    with open(pdf_final_path, "rb") as f:
+        st.download_button(
+            label="Datenblatt herunterladen",
+            data=f,
+            file_name=os.path.basename(pdf_final_path),
+            mime="application/pdf"
+        )
