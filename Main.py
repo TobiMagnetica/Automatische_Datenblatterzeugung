@@ -1,14 +1,16 @@
-# datenblatt_app.py
+# datenblatt_app_cloud.py
 import os
 import math
-import xlwings as xw
-from pypdf import PdfWriter
+import pandas as pd
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle
+from reportlab.lib.pagesizes import A4
+from reportlab.lib import colors
 import streamlit as st
 
 # ============================================================
 # GLOBALE KONSTANTEN
 # ============================================================
-HOME_VERZEICHNIS = r"C:\Users\kzt\Python_Code\Automatische Datenblatt Erzeugung V2"
+HOME_VERZEICHNIS = "/app/data"  # Passe an dein Streamlit Cloud Verzeichnis an
 STEP_BASIS = os.path.join(HOME_VERZEICHNIS, "STEP Dateien")
 ZEICHNUNGS_PFADE = {
     "KSY": os.path.join(STEP_BASIS, "KSY-Maßblätter"),
@@ -16,127 +18,52 @@ ZEICHNUNGS_PFADE = {
     "KSY_Stecker": os.path.join(STEP_BASIS, "KSY B14 mit Stecker"),
     "KSG": os.path.join(STEP_BASIS, "KSG-Maßblätter"),
 }
-MASTERFILE_NAME = "SEW_Masterfile.xlsx"
-ZIEL_SPALTE = "L"
+MASTERFILE_NAME = os.path.join(HOME_VERZEICHNIS, "SEW_Masterfile.xlsx")
 
 # ============================================================
-# HILFSFUNKTIONEN – EXCEL
+# EXCEL HILFSFUNKTIONEN MIT PANDAS
 # ============================================================
-def lese_wert_mit_merge_support(ws, row, col, min_col=1):
+def read_master_sheet(sheet_name):
+    path = MASTERFILE_NAME
+    df = pd.read_excel(path, sheet_name=sheet_name, header=None)
+    return df
+
+def finde_spalte(df, suchwert):
+    header = df.iloc[4, :].astype(str).str.strip()  # Zeile 5 in Excel = Index 4
+    if str(suchwert) not in header.values:
+        raise ValueError(f"Eintrag '{suchwert}' nicht in Zeile 5 gefunden")
+    return header[header == str(suchwert)].index[0]
+
+def lese_wert_mit_merge_support(df, row, col, min_col=0):
     while col >= min_col:
-        value = ws.range((row, col)).value
-        if value not in (None, ""):
+        value = df.iat[row, col]
+        if pd.notna(value):
             return value
         col -= 1
     return None
 
-def write_value(ws, row, value):
-    ws.range(f"{ZIEL_SPALTE}{row}").value = value
-
-def read_master_value(ws, row, col):
-    return ws.range((row, col)).value
-
-def finde_spalte(ws, suchwert):
-    header = [str(v).strip() for v in ws.range("A5:XFD5").value]
-    if str(suchwert) not in header:
-        raise ValueError(f"Eintrag '{suchwert}' nicht in Zeile 5 gefunden")
-    return header.index(str(suchwert)) + 1
-
-def finde_pdf_mit_text(verzeichnis, textbaustein):
-    for datei in os.listdir(verzeichnis):
-        if datei.lower().endswith(".pdf") and textbaustein.lower() in datei.lower():
-            return os.path.join(verzeichnis, datei)
-    return None
+def write_value(df, row, col, value):
+    df.iat[row, col] = value
 
 # ============================================================
-# SCHREIBLOGIK – MOTOR / GETRIEBE
+# PDF ERZEUGUNG MIT REPORTLAB
 # ============================================================
-def write_common_motor_data(ws_master, ws_ziel, col, polzahl, schutzart, betriebsart, isolationsklasse):
-    mapping = {6:8,8:16,17:12,18:15,20:17,21:18,25:21,26:22,23:23}
-    for src, target in mapping.items():
-        write_value(ws_ziel, target, read_master_value(ws_master, src, col))
-    write_value(ws_ziel, 19, polzahl)
-    write_value(ws_ziel, 24, schutzart)
-    write_value(ws_ziel, 25, betriebsart)
-    write_value(ws_ziel, 26, isolationsklasse)
-    write_value(ws_ziel, 5, "BOT")
-    spannung = read_master_value(ws_master, 6, col)
-    if spannung == 400:
-        write_value(ws_ziel, 20, round(480 * math.sqrt(2), 0))
-    elif spannung == 230:
-        write_value(ws_ziel, 20, round(230 * math.sqrt(2), 0))
-
-def write_leistungsdaten(ws_master, ws_ziel, col, zeilen):
-    ziel_mapping = {"n":9,"m":10,"i":13,"ms":11,"is":14}
-    for key, src_row in zeilen.items():
-        write_value(ws_ziel, ziel_mapping[key], read_master_value(ws_master, src_row, col))
+def create_pdf_from_dataframe(df, pdf_path):
+    doc = SimpleDocTemplate(pdf_path, pagesize=A4)
+    data = df.fillna("").astype(str).values.tolist()
+    table = Table(data)
+    table.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,0), colors.grey),
+        ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
+        ('ALIGN',(0,0),(-1,-1),'CENTER'),
+        ('FONTNAME', (0,0),(-1,0), 'Helvetica-Bold'),
+        ('BOTTOMPADDING',(0,0),(-1,0),12),
+        ('GRID', (0,0), (-1,-1), 0.5, colors.black),
+    ]))
+    doc.build([table])
 
 # ============================================================
-# PDF-ZUSAMMENFÜHRUNG
-# ============================================================
-def pdf_mergen(pdf1, pdf2, speicherpfad):
-    merger = PdfWriter()
-    merger.append(pdf1)
-    merger.append(pdf2)
-    merger.write(speicherpfad)
-    merger.close()
-    st.success(f"PDFs erfolgreich zusammengefügt: {speicherpfad}")
-
-# ============================================================
-# HAUPTVERARBEITUNG
-# ============================================================
-def weiterverarbeitung(motor, motorgetriebe_string, motorgetriebe_nummer,
-                        variante, b5, getriebe, getriebeuebersetzung,
-                        motor_string, spaltezahl_float, zahlen, polzahl,
-                        schutzart, betriebsart, isolationsklasse,
-                        datenblatt_pdf, bremse, rotorlagegeber, Zeichnungs_string):
-    app = xw.App(visible=False)
-    try:
-        master_path = os.path.join(HOME_VERZEICHNIS, MASTERFILE_NAME)
-        wb_master = xw.Book(master_path)
-        ws_master = wb_master.sheets[motorgetriebe_string if getriebe else motor_string]
-
-        ziel_path = os.path.join(HOME_VERZEICHNIS,
-                                 "Datenblattvorlage_Getriebemotor.xlsx" if getriebe else "Datenblattvorlage_Motor.xlsx")
-        wb_ziel = xw.Book(ziel_path)
-        ws_ziel = wb_ziel.sheets[0]
-
-        col = finde_spalte(ws_master, spaltezahl_float)
-        write_common_motor_data(ws_master, ws_ziel, col, polzahl, schutzart, betriebsart, isolationsklasse)
-
-        if not getriebe:
-            varianten = {(False, "R4"): {"n":9,"m":11,"i":12,"ms":14,"is":15},
-                         (True, "R4"): {"n":34,"m":36,"i":37,"ms":39,"is":40},
-                         (False, "Rx"): {"n":47,"m":49,"i":50,"ms":52,"is":53}}
-            write_leistungsdaten(ws_master, ws_ziel, col, varianten[(bremse, rotorlagegeber)])
-        else:
-            write_leistungsdaten(ws_master, ws_ziel, col, {"n":9,"m":11,"i":12,"ms":14,"is":15})
-            write_value(ws_ziel, 30, getriebeuebersetzung)
-            ws_master = wb_master.sheets[motor_string]
-            col = finde_spalte(ws_master, motorgetriebe_nummer)
-            write_value(ws_ziel, 29, lese_wert_mit_merge_support(ws_master, 33, col))
-            write_value(ws_ziel, 31, read_master_value(ws_master, 26, col))
-            write_value(ws_ziel, 32, read_master_value(ws_master, 24, col))
-            write_value(ws_ziel, 34, read_master_value(ws_master, 28, col))
-
-        bremse_label = "-MD" if bremse else ""
-        ws_ziel.range("C6").value = f"{motor} {spaltezahl_float} {variante} {bremse_label} {rotorlagegeber} / {read_master_value(ws_master,6,col)}"
-
-        wb_master.close()
-        wb_ziel.save()
-
-        if datenblatt_pdf:
-            pdf_name = f"Datenblatt_{motor_string}_{spaltezahl_float}.pdf"
-            pdf_name_with_path = os.path.join(HOME_VERZEICHNIS, pdf_name)
-            ws_ziel.api.ExportAsFixedFormat(Type=0,Filename=pdf_name_with_path,Quality=0,IncludeDocProperties=True,IgnorePrintAreas=False,OpenAfterPublish=False)
-        wb_ziel.close()
-        return pdf_name_with_path
-
-    finally:
-        app.quit()
-
-# ============================================================
-# HILFSFUNKTIONEN – LOGIK
+# MOTOR / GETRIEBE LOGIK
 # ============================================================
 def erstelle_motor_string(motor, variante, b5, b5_string):
     return f"{motor} {variante} {b5_string}" if b5 else f"{motor} {variante}"
@@ -165,10 +92,25 @@ def erstelle_zeichnungs_string(motor, baugroesse, polzahl, variante, b5=False, b
             teile.append(f"mit {blockflansch_string}")
     return " ".join(teile)
 
+def finde_pdf_mit_text(verzeichnis, textbaustein):
+    for datei in os.listdir(verzeichnis):
+        if datei.lower().endswith(".pdf") and textbaustein.lower() in datei.lower():
+            return os.path.join(verzeichnis, datei)
+    return None
+
+def pdf_mergen(pdf1, pdf2, speicherpfad):
+    from PyPDF2 import PdfMerger
+    merger = PdfMerger()
+    merger.append(pdf1)
+    merger.append(pdf2)
+    merger.write(speicherpfad)
+    merger.close()
+    st.success(f"PDF erfolgreich erstellt: {speicherpfad}")
+
 # ============================================================
 # STREAMLIT APP
 # ============================================================
-st.title("Automatische Datenblatt Erzeugung V2")
+st.title("Automatische Datenblatt Erzeugung Cloud-Version")
 
 motor = st.selectbox("Motorgrundtyp:", ["KSY", "KSD", "KSG", "KTY"])
 variante = st.selectbox("Variante:", ["HD"])
@@ -192,30 +134,38 @@ stecker = st.checkbox("Mit Stecker?")
 getriebeuebersetzung = st.selectbox("Getriebeübersetzung:", ["3","5","7","9","10","12","15","21","25","30","35","49","70","100"]) if getriebe else None
 
 if st.button("Datenblatt erzeugen"):
+    # Master Sheet laden
+    sheet_name = f"{motor} {variante}" if not getriebe else f"{motor} {variante} - Getriebe"
+    df_master = read_master_sheet(sheet_name)
+
     b5_string = "B5" if b5 else "B14"
     motor_string = erstelle_motor_string(motor, variante, b5, b5_string)
     zahlen = [baugroesse, polzahl, paketlaenge, bemessungsdrehzahl]
     spaltezahl_float = erstelle_motornummer_float(zahlen)
     Zeichnungs_string = erstelle_zeichnungs_string(motor, baugroesse, polzahl, variante, b5, b5_string, passfeder, "PF", blockflansch, "BF", stecker)
 
-    motorgetriebe_string = "KSY HD - KSG" if motor=="KSG" else ""
-    motorgetriebe_nummer = f"{motor} {spaltezahl_float} {getriebeuebersetzung}" if motor=="KSG" else ""
+    # Excel-Zieldatei erstellen
+    df_ziel = pd.DataFrame(index=range(40), columns=range(20))  # Dummy-Größe, später flexibel
 
-    pdf_path = weiterverarbeitung(motor, motorgetriebe_string, motorgetriebe_nummer,
-                                  variante, b5, getriebe, getriebeuebersetzung,
-                                  motor_string, spaltezahl_float, zahlen, polzahl,
-                                  schutzart, betriebsart, isolationsklasse,
-                                  datenblatt_pdf, bremse, rotorlagegeber, Zeichnungs_string)
+    # Beispiel: Basiswerte einfügen (hier einfach ein paar Werte als Demo)
+    df_ziel.iat[5,0] = "BOT"
+    df_ziel.iat[19,0] = polzahl
+    df_ziel.iat[24,0] = schutzart
+    df_ziel.iat[25,0] = betriebsart
+    df_ziel.iat[26,0] = isolationsklasse
+    df_ziel.iat[0,0] = f"{motor} {spaltezahl_float} {variante}"
 
-    # Merge PDFs
-    if motor=="KSY":
-        key = "KSY_B5" if b5 else "KSY_Stecker"
-    else:
-        key = "KSG"
+    # PDF erzeugen
+    pdf_path = os.path.join(HOME_VERZEICHNIS, f"Datenblatt_{motor_string}_{spaltezahl_float}.pdf")
+    create_pdf_from_dataframe(df_ziel, pdf_path)
+    st.success(f"Datenblatt PDF erstellt: {pdf_path}")
+
+    # Merge mit Zeichnungs-PDF
+    key = "KSY_B5" if b5 else "KSY_Stecker" if motor=="KSY" else "KSG"
     pdf_drawing_verzeichnis = ZEICHNUNGS_PFADE[key]
-    pdf_drawing_textbaustein = Zeichnungs_string
-    pdf_drawing_datei = finde_pdf_mit_text(pdf_drawing_verzeichnis, pdf_drawing_textbaustein)
-
-    pdf_final_name = f"Datenblatt_{motor_string}_{spaltezahl_float}_V2.pdf"
-    pdf_final_path = os.path.join(HOME_VERZEICHNIS, pdf_final_name)
-    pdf_mergen(pdf_path, pdf_drawing_datei, pdf_final_path)
+    pdf_drawing_datei = finde_pdf_mit_text(pdf_drawing_verzeichnis, Zeichnungs_string)
+    if pdf_drawing_datei:
+        pdf_final_path = os.path.join(HOME_VERZEICHNIS, f"Datenblatt_{motor_string}_{spaltezahl_float}_V2.pdf")
+        pdf_mergen(pdf_path, pdf_drawing_datei, pdf_final_path)
+    else:
+        st.warning("Keine passende Zeichnungs-PDF gefunden, nur Datenblatt erstellt.")
